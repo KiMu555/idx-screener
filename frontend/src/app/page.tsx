@@ -1,34 +1,12 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-type Stock = {
-  ticker: string;
-  category: string;
-  price: number | null;
-  chg_pct: number | null;
-  vol_ratio: number | null;
-  rsi: number | null;
-  adx: number | null;
-  vwap: number | null;
-  per: number | null;
-  pbv: number | null;
-  roe: number | null;
-  div_yield: number | null;
-  der: number | null;
-  macd_status: string | null;
-  score: number | null;
-  buy_price: number | null;
-  sell_price: number | null;
-  stop_loss: number | null;
-  gain_pct: number | null;
-  sl_pct: number | null;
-  rrr: number | null;
-  signal: string;
-  reason: string;
-  update_time: string;
-};
+import {
+  Stock,
+  getInitialRecommendationsAction,
+  refreshFullMarketScanAction,
+  addCustomTickerAction,
+  updateLiveBatchAction,
+} from "./actions";
 
 export default function Dashboard() {
   const [stocks, setStocks] = useState<Stock[]>([]);
@@ -49,22 +27,14 @@ export default function Dashboard() {
 
   const fetchRecommendations = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/recommendations`);
-      if (!response.ok) {
-        throw new Error("Gagal terhubung ke server backend");
-      }
-      const data = await response.json();
-      if (Array.isArray(data)) {
-        setStocks(data);
-      } else {
-        setStocks(data.stocks || []);
-        setMarketOpen(Boolean(data.market_open));
-        setServerTime(data.server_time || "");
-      }
+      const data = await getInitialRecommendationsAction();
+      setStocks(data.stocks || []);
+      setMarketOpen(Boolean(data.market_open));
+      setServerTime(data.server_time || "");
       setErrorMsg(null);
     } catch (err) {
       console.error("Error fetching recommendations:", err);
-      setErrorMsg("Pastikan server Backend Python (port 8000) sudah menyala.");
+      setErrorMsg("Gagal menarik data dari TradingView IDX. Coba klik tombol Scan di kanan atas.");
     }
   }, []);
 
@@ -72,7 +42,6 @@ export default function Dashboard() {
     fetchRecommendations();
   }, [fetchRecommendations]);
 
-  // Update Harga Live Batch (1 Panggilan HTTP ke TradingView untuk seluruh tab aktif!)
   const fetchLivePricesForCurrentTab = useCallback(async () => {
     const currentTabStocks = stocks
       .filter((s) => s.category === activeTab)
@@ -82,42 +51,32 @@ export default function Dashboard() {
     setLoadingLive(true);
     try {
       const tickersToUpdate = currentTabStocks.map((s) => s.ticker);
-      const response = await fetch(`${API_URL}/api/live_batch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tickers: tickersToUpdate }),
+      const resData = await updateLiveBatchAction(tickersToUpdate);
+      const updatedList = resData.updated || [];
+
+      if (resData.server_time) setServerTime(resData.server_time);
+      setMarketOpen(Boolean(resData.market_open));
+
+      setStocks((prev) => {
+        const mapUpdated = new Map(updatedList.map((u) => [u.ticker, u]));
+        return prev.map((item) =>
+          mapUpdated.has(item.ticker)
+            ? { ...item, ...mapUpdated.get(item.ticker)!, category: item.category }
+            : item
+        );
       });
 
-      if (response.ok) {
-        const resData = await response.json();
-        const updatedList: Stock[] = resData.updated || [];
-        if (resData.server_time) setServerTime(resData.server_time);
-        if (typeof resData.market_open === "boolean") {
-          setMarketOpen(resData.market_open);
-        }
-
-        setStocks((prev) => {
-          const mapUpdated = new Map(updatedList.map((u) => [u.ticker, u]));
-          return prev.map((item) =>
-            mapUpdated.has(item.ticker)
-              ? { ...item, ...mapUpdated.get(item.ticker)!, category: item.category }
-              : item
-          );
-        });
-
-        const newBadges: Record<string, boolean> = {};
-        updatedList.forEach((u) => {
-          newBadges[u.ticker] = true;
-        });
-        setLiveTickers((prev) => ({ ...prev, ...newBadges }));
-      }
+      const newBadges: Record<string, boolean> = {};
+      updatedList.forEach((u) => {
+        newBadges[u.ticker] = true;
+      });
+      setLiveTickers((prev) => ({ ...prev, ...newBadges }));
     } catch (err) {
       console.error("Batch live error:", err);
     }
     setLoadingLive(false);
   }, [stocks, activeTab]);
 
-  // Mode Auto-Live Real-Time setiap 15 detik jika diaktifkan oleh pengguna
   useEffect(() => {
     if (!autoLive) return;
     const interval = setInterval(() => {
@@ -132,24 +91,18 @@ export default function Dashboard() {
       "Menarik 35 Parameter Real-Time TradingView Indonesia (VWAP, EMA9/20, SMA50/200, MACD, ADX +DI/-DI, PER, PBV, ROE, Dividen, DER)..."
     );
     try {
-      const response = await fetch(`${API_URL}/api/refresh`, {
-        method: "POST",
-      });
-      if (response.ok) {
-        const data = await response.json();
-        const list = Array.isArray(data) ? data : data.stocks || [];
-        setStocks(list);
-        if (data.server_time) setServerTime(data.server_time);
-        if (typeof data.market_open === "boolean") setMarketOpen(data.market_open);
-        setErrorMsg(null);
-        setInfoMsg(
-          `100% Data TradingView IDX Terkini! ${list.length} saham terbaik BEI berhasil lolos seleksi.`
-        );
-        setTimeout(() => setInfoMsg(null), 6000);
-      }
+      const data = await refreshFullMarketScanAction();
+      setStocks(data.stocks || []);
+      setServerTime(data.server_time || "");
+      setMarketOpen(Boolean(data.market_open));
+      setErrorMsg(null);
+      setInfoMsg(
+        `100% Data TradingView IDX Terkini! ${data.stocks.length} saham terbaik BEI berhasil lolos seleksi.`
+      );
+      setTimeout(() => setInfoMsg(null), 6000);
     } catch (err) {
       console.error("Sync error:", err);
-      setErrorMsg("Gagal melakukan pemindaian pasar dengan Backend.");
+      setErrorMsg("Gagal melakukan pemindaian pasar TradingView IDX.");
     }
     setSyncingDb(false);
   };
@@ -160,19 +113,7 @@ export default function Dashboard() {
     setAddingTicker(true);
     setErrorMsg(null);
     try {
-      const response = await fetch(`${API_URL}/api/add_ticker`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ticker: customTicker.trim().toUpperCase(),
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(
-          `Kode saham ${customTicker.toUpperCase()} tidak ditemukan di TradingView IDX.`
-        );
-      }
-      const newStock: Stock = await response.json();
+      const newStock = await addCustomTickerAction(customTicker);
       setStocks((prev) => {
         const filtered = prev.filter((s) => s.ticker !== newStock.ticker);
         return [newStock, ...filtered];
@@ -187,7 +128,7 @@ export default function Dashboard() {
       if (err instanceof Error) {
         setErrorMsg(err.message);
       } else {
-        setErrorMsg("Gagal menganalisis saham tersebut.");
+        setErrorMsg("Kode saham tidak ditemukan di TradingView IDX.");
       }
     }
     setAddingTicker(false);
@@ -217,7 +158,6 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-900 text-white p-6 md:p-8">
       <div className="max-w-7xl mx-auto">
-        {/* Header & Status Pasar BEI */}
         <header className="mb-6 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
             <div className="flex flex-wrap items-center gap-3">
@@ -282,7 +222,7 @@ export default function Dashboard() {
             </svg>
             {syncingDb
               ? "Memindai TradingView IDX..."
-              : "Refresh Screener Sekarang!"}
+              : "Refresh Screener Sekarang"}
           </button>
         </header>
 
@@ -298,7 +238,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Panel Kontrol */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-4 mb-6 bg-gray-800/90 p-4 rounded-lg border border-gray-700">
           <div className="lg:col-span-3">
             <label className="block text-xs text-gray-400 mb-1">
@@ -373,7 +312,6 @@ export default function Dashboard() {
           </form>
         </div>
 
-        {/* Navigation Tabs & Live Controls */}
         <div className="flex flex-wrap items-center justify-between gap-4 mb-4 border-b border-gray-700 pb-3">
           <div className="flex gap-3">
             {["Scalping", "Swing", "Investing"].map((tab) => {
@@ -398,7 +336,6 @@ export default function Dashboard() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {/* Tombol Auto-Refresh Live 15 Detik */}
             <button
               onClick={() => setAutoLive((prev) => !prev)}
               className={`px-3.5 py-2 rounded-lg font-bold text-xs border transition cursor-pointer flex items-center gap-2 ${
@@ -415,7 +352,6 @@ export default function Dashboard() {
               {autoLive ? "Auto-Refresh 15s: ON" : "Auto-Refresh 15s: OFF"}
             </button>
 
-            {/* Tombol Batch Live Update (< 1% API Limit) */}
             <button
               onClick={fetchLivePricesForCurrentTab}
               disabled={loadingLive}
@@ -445,7 +381,6 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Data Table */}
         <div className="bg-gray-800 rounded-lg shadow-lg overflow-x-auto border border-gray-700">
           <table className="w-full text-left border-collapse">
             <thead className="bg-gray-700/90 text-gray-200 text-xs uppercase">
@@ -600,8 +535,7 @@ export default function Dashboard() {
               {filteredStocks.length === 0 && (
                 <tr>
                   <td colSpan={7} className="p-8 text-center text-gray-400">
-                    Memperbarui skema database ke 35 Parameter TradingView IDX... Klik tombol biru{" "}
-                    <strong>&quot;Refresh Screener Sekarang!&quot;</strong> di pojok kanan atas.
+                    Sedang memindai data real-time dari TradingView Indonesia...
                   </td>
                 </tr>
               )}
